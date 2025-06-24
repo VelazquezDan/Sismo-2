@@ -1,30 +1,54 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
 import plotly.express as px
+import plotly.graph_objects as go
 import requests
 from datetime import datetime, timedelta
+import geopandas as gpd
+import io
 
 # Configuración de la página
-st.set_page_config(page_title="Monitor de Sismos", page_icon="🌍", layout="wide")
+st.set_page_config(page_title="Sismos México", page_icon="🇲🇽", layout="wide")
 
 # Título de la aplicación
-st.title("🌍 Monitor de Actividad Sísmica Mundial")
-st.markdown("Esta aplicación muestra información sobre sismos recientes en todo el mundo, utilizando datos del Servicio Geológico de los Estados Unidos (USGS).")
+st.title("🇲🇽 Monitor Sísmico de México")
+st.markdown("Aplicación para analizar la actividad sísmica en la República Mexicana")
 
-# Obtener datos de sismos
-@st.cache_data(ttl=3600)  # Cachear datos por 1 hora
-def get_earthquake_data(days=30, min_magnitude=4.0):
+# Cargar geometría de México (simplificada)
+@st.cache_data
+def load_mexico_geometry():
+    # GeoJSON simplificado de México
+    mexico_geojson = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"name": "México"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[-117.125, 32.535], [-86.733, 18.283], [-86.733, 14.533], [-92.229, 14.538], [-117.125, 32.535]]]
+                }
+            }
+        ]
+    }
+    return gpd.GeoDataFrame.from_features(mexico_geojson)
+
+# Obtener datos de sismos en México
+@st.cache_data(ttl=3600)
+def get_mexico_earthquakes(days=30, min_magnitude=4.0):
     end_time = datetime.utcnow()
     start_time = end_time - timedelta(days=days)
     
-    url = f"https://earthquake.usgs.gov/fdsnws/event/1/query"
+    url = "https://earthquake.usgs.gov/fdsnws/event/1/query"
     params = {
         "format": "geojson",
         "starttime": start_time.strftime("%Y-%m-%d"),
         "endtime": end_time.strftime("%Y-%m-%d"),
         "minmagnitude": min_magnitude,
-        "orderby": "time"
+        "maxlatitude": 32.535,
+        "minlatitude": 14.533,
+        "maxlongitude": -86.733,
+        "minlongitude": -117.125
     }
     
     response = requests.get(url, params=params)
@@ -50,89 +74,220 @@ def get_earthquake_data(days=30, min_magnitude=4.0):
 # Sidebar con controles
 with st.sidebar:
     st.header("Configuración")
-    days = st.slider("Número de días a mostrar", 1, 90, 30)
+    days = st.slider("Número de días a mostrar", 1, 365, 30)
     min_magnitude = st.slider("Magnitud mínima", 2.0, 8.0, 4.0, step=0.1)
     
     st.markdown("---")
-    st.markdown("**Datos proporcionados por:**")
-    st.markdown("[USGS Earthquake Hazards Program](https://earthquake.usgs.gov)")
+    st.header("Cargar Datos Locales")
+    uploaded_file = st.file_uploader("Subir dataset de sismos (CSV)", type="csv")
+    
     st.markdown("---")
-    st.markdown("Creado con Streamlit")
+    st.markdown("**Fuentes de datos:**")
+    st.markdown("- [USGS Earthquake Hazards Program](https://earthquake.usgs.gov)")
+    st.markdown("- [SSN - UNAM](https://www.ssn.unam.mx)")
 
-# Obtener datos
-df = get_earthquake_data(days, min_magnitude)
+# Obtener datos de USGS
+df_usgs = get_mexico_earthquakes(days, min_magnitude)
+
+# Cargar datos locales si se proporcionan
+df_local = None
+if uploaded_file is not None:
+    try:
+        df_local = pd.read_csv(uploaded_file)
+        # Convertir columnas de fecha si existen
+        if 'Fecha' in df_local.columns:
+            df_local['Fecha'] = pd.to_datetime(df_local['Fecha'])
+    except Exception as e:
+        st.error(f"Error al cargar el archivo: {e}")
 
 # Mostrar resumen estadístico
-st.header("📊 Resumen Estadístico")
-if not df.empty:
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total de sismos", len(df))
-    col2.metric("Magnitud máxima", f"{df['Magnitud'].max():.1f}")
-    col3.metric("Magnitud promedio", f"{df['Magnitud'].mean():.1f}")
-    col4.metric("Profundidad promedio", f"{df['Profundidad (km)'].mean():.1f} km")
-    
-    # Mostrar tabla con los sismos más fuertes
-    st.subheader("🔝 Sismos más fuertes")
-    st.dataframe(df.sort_values("Magnitud", ascending=False).head(10), 
-                 column_config={
-                     "Fecha": st.column_config.DatetimeColumn(format="YYYY-MM-DD HH:mm:ss"),
-                     "Magnitud": st.column_config.NumberColumn(format="%.1f"),
-                     "Profundidad (km)": st.column_config.NumberColumn(format="%.1f km")
-                 })
-else:
-    st.warning("No se encontraron sismos con los criterios seleccionados.")
+st.header("📊 Resumen Estadístico - México")
 
-# Gráficos y mapas
-if not df.empty:
-    st.header("📈 Visualizaciones")
+if not df_usgs.empty or df_local is not None:
+    col1, col2, col3 = st.columns(3)
     
-    # Pestañas para diferentes visualizaciones
-    tab1, tab2, tab3 = st.tabs(["Mapa de Sismos", "Distribución de Magnitudes", "Actividad Diaria"])
+    if not df_usgs.empty:
+        col1.metric("Sismos USGS", len(df_usgs))
+        col2.metric("Magnitud máxima (USGS)", f"{df_usgs['Magnitud'].max():.1f}")
     
-    with tab1:
-        st.subheader("🌐 Mapa de Sismos")
-        fig = px.scatter_geo(df, 
-                            lat="Latitud", 
-                            lon="Longitud", 
-                            size="Magnitud",
-                            color="Magnitud",
-                            hover_name="Lugar",
-                            hover_data=["Fecha", "Profundidad (km)"],
-                            projection="natural earth",
-                            title=f"Sismos de magnitud ≥ {min_magnitude} en los últimos {days} días",
-                            color_continuous_scale="Viridis_r")
-        fig.update_geos(showcoastlines=True, coastlinecolor="Black", showland=True, landcolor="lightgray")
-        st.plotly_chart(fig, use_container_width=True)
+    if df_local is not None:
+        col3.metric("Sismos locales", len(df_local))
+        if 'Magnitud' in df_local.columns:
+            col2.metric("Magnitud máxima (Local)", f"{df_local['Magnitud'].max():.1f}")
+
+# Visualización de mapas
+st.header("🌍 Mapa de Actividad Sísmica")
+
+mexico_gdf = load_mexico_geometry()
+
+fig = px.choropleth(mexico_gdf, geojson=mexico_gdf.geometry, 
+                    locations=mexico_gdf.index, 
+                    color_continuous_scale="Blues",
+                    projection="mercator")
+fig.update_geos(fitbounds="locations", visible=False)
+
+# Añadir sismos USGS
+if not df_usgs.empty:
+    fig.add_trace(go.Scattergeo(
+        lon = df_usgs['Longitud'],
+        lat = df_usgs['Latitud'],
+        text = df_usgs['Lugar'] + "<br>Magnitud: " + df_usgs['Magnitud'].astype(str),
+        marker = dict(
+            size = df_usgs['Magnitud']*2,
+            color = df_usgs['Magnitud'],
+            colorscale = 'Viridis',
+            showscale = True,
+            colorbar_title = 'Magnitud (USGS)'
+        ),
+        name = 'USGS',
+        hoverinfo = 'text'
+    ))
+
+# Añadir sismos locales si existen
+if df_local is not None and 'Latitud' in df_local.columns and 'Longitud' in df_local.columns:
+    fig.add_trace(go.Scattergeo(
+        lon = df_local['Longitud'],
+        lat = df_local['Latitud'],
+        text = df_local.get('Lugar', 'Sismo local') + "<br>" + 
+               df_local.get('Magnitud', '').astype(str),
+        marker = dict(
+            size = df_local.get('Magnitud', 4)*2,
+            color = 'red',
+            symbol = 'x'
+        ),
+        name = 'Local',
+        hoverinfo = 'text'
+    ))
+
+fig.update_layout(
+    title_text = 'Sismos en México',
+    geo = dict(
+        scope = 'north america',
+        landcolor = 'rgb(217, 217, 217)',
+        center=dict(lon=-102, lat=23),
+        projection_scale=2
+    )
+)
+
+st.plotly_chart(fig, use_container_width=True)
+
+# Comparación de datasets
+if df_local is not None:
+    st.header("🔍 Comparación de Datasets")
     
-    with tab2:
-        st.subheader("📊 Distribución de Magnitudes")
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.hist(df["Magnitud"], bins=20, edgecolor="black", color="skyblue")
-        ax.set_xlabel("Magnitud")
-        ax.set_ylabel("Número de sismos")
-        ax.set_title(f"Distribución de magnitudes (≥ {min_magnitude})")
-        st.pyplot(fig)
+    # Seleccionar columnas para comparar
+    cols_to_compare = st.multiselect(
+        "Seleccionar columnas para comparar",
+        options=[col for col in df_local.columns if col in df_usgs.columns],
+        default=['Magnitud', 'Profundidad (km)'] if 'Magnitud' in df_local.columns else []
+    )
+    
+    if cols_to_compare:
+        tab1, tab2 = st.tabs(["Distribuciones", "Series Temporales"])
         
-        # Gráfico de profundidad vs magnitud
-        st.subheader("📉 Profundidad vs Magnitud")
-        fig, ax = plt.subplots(figsize=(10, 6))
-        scatter = ax.scatter(df["Profundidad (km)"], df["Magnitud"], 
-                            c=df["Magnitud"], cmap="viridis", alpha=0.6)
-        ax.set_xlabel("Profundidad (km)")
-        ax.set_ylabel("Magnitud")
-        ax.set_title("Relación entre profundidad y magnitud")
-        plt.colorbar(scatter, label="Magnitud")
-        st.pyplot(fig)
+        with tab1:
+            for col in cols_to_compare:
+                fig = go.Figure()
+                fig.add_trace(go.Histogram(
+                    x=df_usgs[col],
+                    name='USGS',
+                    opacity=0.75
+                ))
+                fig.add_trace(go.Histogram(
+                    x=df_local[col],
+                    name='Local',
+                    opacity=0.75
+                ))
+                fig.update_layout(
+                    barmode='overlay',
+                    title_text=f'Distribución de {col}',
+                    xaxis_title=col,
+                    yaxis_title='Conteo'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+        
+        with tab2:
+            if 'Fecha' in df_local.columns and 'Fecha' in df_usgs.columns:
+                for col in cols_to_compare:
+                    fig = go.Figure()
+                    
+                    # Agrupar por fecha para USGS
+                    usgs_daily = df_usgs.resample('D', on='Fecha')[col].mean().reset_index()
+                    fig.add_trace(go.Scatter(
+                        x=usgs_daily['Fecha'],
+                        y=usgs_daily[col],
+                        name='USGS',
+                        line=dict(color='blue')
+                    ))
+                    
+                    # Agrupar por fecha para local
+                    local_daily = df_local.resample('D', on='Fecha')[col].mean().reset_index()
+                    fig.add_trace(go.Scatter(
+                        x=local_daily['Fecha'],
+                        y=local_daily[col],
+                        name='Local',
+                        line=dict(color='red')
+                    ))
+                    
+                    fig.update_layout(
+                        title_text=f'Serie temporal de {col}',
+                        xaxis_title='Fecha',
+                        yaxis_title=col
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("No se encontró columna 'Fecha' en ambos datasets para comparación temporal")
+
+# Análisis por región
+st.header("📍 Análisis por Región")
+
+# Definir regiones sísmicas de México
+regiones = {
+    "Pacífico": {"lat": 18.0, "lon": -103.0, "radius": 3},
+    "Golfo": {"lat": 20.0, "lon": -95.0, "radius": 3},
+    "Norte": {"lat": 28.0, "lon": -105.0, "radius": 4},
+    "Centro": {"lat": 19.4, "lon": -99.1, "radius": 2},
+    "Sur": {"lat": 16.0, "lon": -95.0, "radius": 3}
+}
+
+selected_region = st.selectbox("Seleccionar región", options=list(regiones.keys()))
+
+if not df_usgs.empty:
+    region_data = regiones[selected_region]
     
-    with tab3:
-        st.subheader("📅 Actividad Sísmica Diaria")
-        daily_counts = df.resample("D", on="Fecha").size()
-        fig, ax = plt.subplots(figsize=(10, 6))
-        daily_counts.plot(kind="bar", ax=ax, color="salmon", edgecolor="black")
-        ax.set_xlabel("Fecha")
-        ax.set_ylabel("Número de sismos")
-        ax.set_title(f"Sismos diarios (≥ {min_magnitude})")
-        plt.xticks(rotation=45)
-        st.pyplot(fig)
-else:
-    st.warning("No hay datos para mostrar las visualizaciones.")
+    # Filtrar sismos en la región seleccionada
+    df_region = df_usgs[
+        (df_usgs['Latitud'] >= region_data['lat'] - region_data['radius']) &
+        (df_usgs['Latitud'] <= region_data['lat'] + region_data['radius']) &
+        (df_usgs['Longitud'] >= region_data['lon'] - region_data['radius']) &
+        (df_usgs['Longitud'] <= region_data['lon'] + region_data['radius'])
+    ]
+    
+    if not df_region.empty:
+        st.subheader(f"Actividad sísmica en {selected_region}")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric("Total de sismos", len(df_region))
+            st.metric("Magnitud máxima", f"{df_region['Magnitud'].max():.1f}")
+        
+        with col2:
+            st.metric("Profundidad promedio", f"{df_region['Profundidad (km)'].mean():.1f} km")
+            st.metric("Último sismo", df_region['Fecha'].max().strftime("%Y-%m-%d"))
+        
+        # Mapa de la región
+        fig = px.scatter_mapbox(df_region, 
+                               lat="Latitud", 
+                               lon="Longitud", 
+                               size="Magnitud",
+                               color="Magnitud",
+                               hover_name="Lugar",
+                               hover_data=["Fecha", "Profundidad (km)"],
+                               zoom=5,
+                               center={"lat": region_data['lat'], "lon": region_data['lon']},
+                               title=f"Sismos en {selected_region}")
+        fig.update_layout(mapbox_style="open-street-map")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning(f"No se encontraron sismos en la región {selected_region} en el período seleccionado")
