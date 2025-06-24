@@ -1,5 +1,9 @@
-matplotlib>=3.0
+streamlit>=1.0
 pandas>=1.0
 plotly>=5.0
 requests>=2.0
-streamlit>=1.0
+geopandas>=0.10.0
+shapely>=1.7.1
+pyproj>=3.0.0
+fiona>=1.8.0
+matplotlib>=3.0  # Opcional, pero útil para algunos gráficos
